@@ -180,7 +180,8 @@ inline sensor_msgs::PointCloud2 toRosMsg(const LidarPointCloudMsg& rs_msg, const
   return ros_msg;
 }
 #ifdef ENABLE_IMU_DATA_PARSE
-sensor_msgs::Imu toRosMsg(const std::shared_ptr<ImuData>& data, const std::string& frame_id)
+sensor_msgs::Imu toRosMsg(const std::shared_ptr<ImuData>& data, const std::string& frame_id,
+                          double acc_scale = 1.0)
 {
   sensor_msgs::Imu imu_msg;
 
@@ -191,9 +192,12 @@ sensor_msgs::Imu toRosMsg(const std::shared_ptr<ImuData>& data, const std::strin
   imu_msg.angular_velocity.y = data->angular_velocity_y;
   imu_msg.angular_velocity.z = data->angular_velocity_z;
 
-  imu_msg.linear_acceleration.x = data->linear_acceleration_x;
-  imu_msg.linear_acceleration.y = data->linear_acceleration_y;
-  imu_msg.linear_acceleration.z = data->linear_acceleration_z;
+  // acc_scale converts the decoder's unit to m/s^2, which sensor_msgs/Imu specifies (REP 145).
+  imu_msg.linear_acceleration.x = data->linear_acceleration_x * acc_scale;
+  imu_msg.linear_acceleration.y = data->linear_acceleration_y * acc_scale;
+  imu_msg.linear_acceleration.z = data->linear_acceleration_z * acc_scale;
+  // No orientation estimate: a -1 in the first covariance element says so (sensor_msgs/Imu).
+  imu_msg.orientation_covariance[0] = -1.0;
   return imu_msg;
 }
 #endif
@@ -214,6 +218,8 @@ private:
   ros::Publisher imu_pub_; 
 #endif
   std::string frame_id_;
+  std::string imu_frame_id_;
+  double imu_acc_scale_;
   bool send_by_rows_;
 };
 
@@ -229,6 +235,13 @@ inline void DestinationPointCloudRos::init(const YAML::Node& config)
 
   yamlRead<std::string>(config["ros"], 
       "ros_frame_id", frame_id_, "rslidar");
+  // The IMU sits apart from the LiDAR's origin; let it have its own frame (defaults to the LiDAR's).
+  yamlRead<std::string>(config["ros"], 
+      "ros_imu_frame_id", imu_frame_id_, frame_id_);
+  // Factor from the decoder's acceleration unit to m/s^2. The RSAIRY decoder reports g (set 9.80665);
+  // 1.0 leaves the decoder's values as they are.
+  yamlRead<double>(config["ros"], 
+      "ros_imu_linear_acceleration_scale", imu_acc_scale_, 1.0);
 
   std::string ros_send_topic;
   yamlRead<std::string>(config["ros"], 
@@ -253,7 +266,7 @@ inline void DestinationPointCloudRos::sendPointCloud(const LidarPointCloudMsg& m
 #ifdef ENABLE_IMU_DATA_PARSE
 inline void DestinationPointCloudRos::sendImuData(const std::shared_ptr<ImuData> & data)
 {
-  imu_pub_.publish(toRosMsg(data, frame_id_));
+  imu_pub_.publish(toRosMsg(data, imu_frame_id_, imu_acc_scale_));
 }
 #endif
 }  // namespace lidar
@@ -409,7 +422,8 @@ inline sensor_msgs::msg::PointCloud2 toRosMsg(const LidarPointCloudMsg& rs_msg, 
   return ros_msg;
 }
 #ifdef ENABLE_IMU_DATA_PARSE
-sensor_msgs::msg::Imu toRosMsg(const std::shared_ptr<ImuData>& data, const std::string& frame_id)
+sensor_msgs::msg::Imu toRosMsg(const std::shared_ptr<ImuData>& data, const std::string& frame_id,
+                          double acc_scale = 1.0)
 {
   sensor_msgs::msg::Imu imu_msg;
 
@@ -420,9 +434,12 @@ sensor_msgs::msg::Imu toRosMsg(const std::shared_ptr<ImuData>& data, const std::
   imu_msg.angular_velocity.y = data->angular_velocity_y;
   imu_msg.angular_velocity.z = data->angular_velocity_z;
 
-  imu_msg.linear_acceleration.x = data->linear_acceleration_x;
-  imu_msg.linear_acceleration.y = data->linear_acceleration_y;
-  imu_msg.linear_acceleration.z = data->linear_acceleration_z;
+  // acc_scale converts the decoder's unit to m/s^2, which sensor_msgs/Imu specifies (REP 145).
+  imu_msg.linear_acceleration.x = data->linear_acceleration_x * acc_scale;
+  imu_msg.linear_acceleration.y = data->linear_acceleration_y * acc_scale;
+  imu_msg.linear_acceleration.z = data->linear_acceleration_z * acc_scale;
+  // No orientation estimate: a -1 in the first covariance element says so (sensor_msgs/Imu).
+  imu_msg.orientation_covariance[0] = -1.0;
   return imu_msg;
 }
 #endif
@@ -444,6 +461,8 @@ private:
   rclcpp::Publisher<sensor_msgs::msg::Imu>::SharedPtr imu_pub_;
 #endif
   std::string frame_id_;
+  std::string imu_frame_id_;
+  double imu_acc_scale_;
   bool send_by_rows_;
 };
 
@@ -459,6 +478,13 @@ inline void DestinationPointCloudRos::init(const YAML::Node& config)
 
   yamlRead<std::string>(config["ros"], 
       "ros_frame_id", frame_id_, "rslidar");
+  // The IMU sits apart from the LiDAR's origin; let it have its own frame (defaults to the LiDAR's).
+  yamlRead<std::string>(config["ros"], 
+      "ros_imu_frame_id", imu_frame_id_, frame_id_);
+  // Factor from the decoder's acceleration unit to m/s^2. The RSAIRY decoder reports g (set 9.80665);
+  // 1.0 leaves the decoder's values as they are.
+  yamlRead<double>(config["ros"], 
+      "ros_imu_linear_acceleration_scale", imu_acc_scale_, 1.0);
 
   std::string ros_send_topic;
   yamlRead<std::string>(config["ros"], 
@@ -491,7 +517,7 @@ inline void DestinationPointCloudRos::sendPointCloud(const LidarPointCloudMsg& m
 #ifdef ENABLE_IMU_DATA_PARSE
 inline void DestinationPointCloudRos::sendImuData(const std::shared_ptr<ImuData> & data)
 {
-  imu_pub_->publish(toRosMsg(data, frame_id_));
+  imu_pub_->publish(toRosMsg(data, imu_frame_id_, imu_acc_scale_));
 }
 #endif
 }  // namespace lidar
