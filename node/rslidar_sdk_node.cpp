@@ -44,25 +44,18 @@ THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 using namespace robosense::lidar;
 
-#ifdef ROS2_FOUND
-std::mutex g_mtx;
-std::condition_variable g_cv;
-#endif
-
+#ifdef ROS_FOUND
 static void sigHandler(int sig)
 {
-  RS_MSG << "RoboSense-LiDAR-Driver is stopping....." << RS_REND;
-
-#ifdef ROS_FOUND
   ros::shutdown();
-#elif ROS2_FOUND
-  g_cv.notify_all();
-#endif
 }
+#endif
 
 int main(int argc, char** argv)
 {
+#ifdef ROS_FOUND
   signal(SIGINT, sigHandler);  ///< bind ctrl+c signal with the sigHandler function
+#endif
 
   RS_TITLE << "********************************************************" << RS_REND;
   RS_TITLE << "**********                                    **********" << RS_REND;
@@ -128,8 +121,19 @@ int main(int argc, char** argv)
 #ifdef ROS_FOUND
   ros::spin();
 #elif ROS2_FOUND
-  std::unique_lock<std::mutex> lck(g_mtx);
-  g_cv.wait(lck);
+  // rclcpp's default signal handlers shut the context down on SIGINT and SIGTERM, which makes spin() return.
+  rclcpp::spin(nd);
+#endif
+
+#if defined(ROS_FOUND) || defined(ROS2_FOUND)
+  RS_MSG << "RoboSense-LiDAR-Driver is stopping....." << RS_REND;
+#endif
+
+  demo_ptr->stop();
+  demo_ptr.reset();
+
+#ifdef ROS2_FOUND
+  rclcpp::shutdown();
 #endif
 
   return 0;

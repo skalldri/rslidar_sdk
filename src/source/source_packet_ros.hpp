@@ -245,6 +245,7 @@ class SourcePacketRos : public SourceDriver
 public: 
 
   virtual void init(const YAML::Node& config);
+  virtual void stop();
 
   SourcePacketRos();
 
@@ -282,6 +283,16 @@ void SourcePacketRos::init(const YAML::Node& config)
 void SourcePacketRos::putPacket(const rslidar_msg::msg::RslidarPacket::SharedPtr msg) const
 {
   driver_ptr_->decodePacket(toRsMsg(*msg));
+}
+
+void SourcePacketRos::stop()
+{
+  // spin() returns once the rclcpp context is shut down.
+  if (subscription_spin_thread_.joinable())
+  {
+    subscription_spin_thread_.join();
+  }
+  SourceDriver::stop();
 }
 
 inline rslidar_msg::msg::RslidarPacket toRosMsg(const Packet& rs_msg, const std::string& frame_id)
