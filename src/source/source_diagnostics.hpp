@@ -41,6 +41,7 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <diagnostic_updater/diagnostic_updater.hpp>
 #include <rclcpp/rclcpp.hpp>
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cstdio>
@@ -57,9 +58,10 @@ namespace lidar
 // The LiDAR's health on /diagnostics (diagnostic_msgs/DiagnosticArray), once a second, through
 // diagnostic_updater, for diagnostic_aggregator and rqt_robot_monitor.
 //
-// One status, named "<node_name>: LiDAR". Its values:
+// One status, named "<node_name>: LiDAR". Its message always gives the temperature: the reading
+// while packets arrive, and the last reading and its age once they stop. Its values:
 // - the temperature the LiDAR reports in its MSOP packets (LidarDriver::getTemperature), while
-//   packets arrive;
+//   packets arrive, and the last reading once they stop;
 // - the point cloud rate, and the IMU rate when an IMU is expected or has sent data;
 // - the driver's packet timeouts and packet error reports since start, and the last error;
 // - the model, and the serial number and firmware versions from the DIFOP packets.
@@ -120,6 +122,8 @@ private:
 
   bool imu_shown_;  // an IMU is expected, or has sent data
   int64_t last_update_ns_;
+  float last_temperature_{ 0 };     // the last fresh reading, for the message once packets stop
+  int64_t last_temperature_ns_{ 0 };  // steady_clock, ns; 0 = none yet
 
   rclcpp::Node::SharedPtr node_;
   std::unique_ptr<diagnostic_updater::Updater> updater_;
@@ -219,31 +223,55 @@ inline void SourceDiagnostics::update(diagnostic_updater::DiagnosticStatusWrappe
     }
   }
 
-  char value[32];
+  char value[64];
 
+  // The message always carries the temperature, so a monitor shows it without expanding the
+  // status: "Running, 45.3 °C", "Temperature high, 62.1 °C (WARN at 60.0 °C)", or, once packets
+  // stop, the last reading and its age.
   if (point_clouds == 0)
   {
-    stat.summary(DiagnosticStatus::ERROR, recent(last_timeout_ns_.load()) ? "No packets from the LiDAR" :
-                                                                            "No point clouds from the LiDAR");
+    std::string message = recent(last_timeout_ns_.load()) ? "No packets from the LiDAR" :
+                                                            "No point clouds from the LiDAR";
     stat.add("Temperature (°C)", "no data");
+    if (last_temperature_ns_ != 0)
+    {
+      snprintf(value, sizeof(value), "%.1f °C, %.0f s ago", last_temperature_,
+               (now - last_temperature_ns_) * 1e-9);
+      message += std::string(", last ") + value;
+      stat.add("Last temperature", value);
+    }
+    stat.summary(DiagnosticStatus::ERROR, message);
   }
   else
   {
-    stat.summary(DiagnosticStatus::OK, "Running");
+    unsigned char level = DiagnosticStatus::OK;
+    std::string problems;
+    auto problem = [&level, &problems](unsigned char lvl, const char* text) {
+      level = std::max(level, lvl);
+      problems += (problems.empty() ? "" : "; ") + std::string(text);
+    };
 
     // Updated by every MSOP packet; the point clouds show that packets came in this period.
     float temperature;
+    std::string temperature_text = "temperature not reported";
     if (driver_->getTemperature(temperature))
     {
+      last_temperature_ = temperature;
+      last_temperature_ns_ = now;
       snprintf(value, sizeof(value), "%.1f", temperature);
       stat.add("Temperature (°C)", value);
+      temperature_text = std::string(value) + " °C";
       if (temperature_error_ > 0 && temperature >= temperature_error_)
       {
-        stat.mergeSummary(DiagnosticStatus::ERROR, "Temperature high");
+        problem(DiagnosticStatus::ERROR, "Temperature high");
+        snprintf(value, sizeof(value), " (ERROR at %.1f °C)", temperature_error_);
+        temperature_text += value;
       }
       else if (temperature_warn_ > 0 && temperature >= temperature_warn_)
       {
-        stat.mergeSummary(DiagnosticStatus::WARN, "Temperature high");
+        problem(DiagnosticStatus::WARN, "Temperature high");
+        snprintf(value, sizeof(value), " (WARN at %.1f °C)", temperature_warn_);
+        temperature_text += value;
       }
     }
     else
@@ -253,12 +281,13 @@ inline void SourceDiagnostics::update(diagnostic_updater::DiagnosticStatusWrappe
 
     if (recent(last_error_ns_.load()))
     {
-      stat.mergeSummary(DiagnosticStatus::WARN, "Packet errors");
+      problem(DiagnosticStatus::WARN, "Packet errors");
     }
     if (imu_shown_ && imu_data == 0)
     {
-      stat.mergeSummary(DiagnosticStatus::WARN, "No IMU data");
+      problem(DiagnosticStatus::WARN, "No IMU data");
     }
+    stat.summary(level, (problems.empty() ? std::string("Running") : problems) + ", " + temperature_text);
   }
 
   snprintf(value, sizeof(value), "%.1f", period > 0 ? point_clouds / period : 0.0);
