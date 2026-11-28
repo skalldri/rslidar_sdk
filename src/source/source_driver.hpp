@@ -33,6 +33,7 @@ THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #pragma once
 
 #include "source/source.hpp"
+#include "source/source_diagnostics.hpp"
 
 #include <rs_driver/api/lidar_driver.hpp>
 #include <rs_driver/utility/sync_queue.hpp>
@@ -77,6 +78,9 @@ protected:
 #endif
   std::thread point_cloud_process_thread_;
   std::atomic<bool> to_exit_process_;
+#ifdef ROS2_FOUND
+  std::unique_ptr<SourceDiagnostics> diagnostics_;
+#endif
 };
 
 SourceDriver::SourceDriver(SourceType src_type)
@@ -170,6 +174,23 @@ inline void SourceDriver::init(const YAML::Node& config)
     RS_ERROR << "Driver Initialize Error...." << RS_REND;
     exit(-1);
   }
+
+#ifdef ROS2_FOUND
+  // The LiDAR's health on /diagnostics, from a node of this name; off when the name is empty.
+  std::string diagnostics_name;
+  float temperature_warn = 0, temperature_error = 0;
+  if (config["ros"])
+  {
+    yamlRead<std::string>(config["ros"], "ros_diagnostics_name", diagnostics_name, "");
+    yamlRead<float>(config["ros"], "ros_diagnostics_temperature_warn", temperature_warn, 0);
+    yamlRead<float>(config["ros"], "ros_diagnostics_temperature_error", temperature_error, 0);
+  }
+  if (!diagnostics_name.empty())
+  {
+    diagnostics_.reset(
+        new SourceDiagnostics(diagnostics_name, lidar_type, temperature_warn, temperature_error, driver_ptr_));
+  }
+#endif
 }
 
 inline void SourceDriver::start()
@@ -188,6 +209,9 @@ inline void SourceDriver::stop()
   {
     driver_ptr_->stop();
   }
+#ifdef ROS2_FOUND
+  diagnostics_.reset();
+#endif
 
   // stop() runs from both NodeManager and the destructor, so join only threads that are still joinable.
   to_exit_process_ = true;
@@ -231,6 +255,12 @@ inline void SourceDriver::putPacket(const Packet& msg)
 
 void SourceDriver::putPointCloud(std::shared_ptr<LidarPointCloudMsg> msg)
 {
+#ifdef ROS2_FOUND
+  if (diagnostics_)
+  {
+    diagnostics_->countPointCloud();
+  }
+#endif
   point_cloud_queue_.push(msg);
 }
 #ifdef ENABLE_IMU_DATA_PARSE
@@ -245,6 +275,12 @@ inline std::shared_ptr<ImuData> SourceDriver::getImuData(void)
 }
 void SourceDriver::putImuData(const std::shared_ptr<ImuData>& msg)
 {
+#ifdef ROS2_FOUND
+  if (diagnostics_)
+  {
+    diagnostics_->countImuData();
+  }
+#endif
   imu_data_queue_.push(msg);
 }
 
@@ -280,6 +316,12 @@ void SourceDriver::processPointCloud()
 
 inline void SourceDriver::putException(const lidar::Error& msg)
 {
+#ifdef ROS2_FOUND
+  if (diagnostics_)
+  {
+    diagnostics_->countError(msg);
+  }
+#endif
   switch (msg.error_code_type)
   {
     case lidar::ErrCodeType::INFO_CODE:
