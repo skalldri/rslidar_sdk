@@ -44,3 +44,7 @@ lidar:
       ros_imu_linear_acceleration_scale: 1.0          #Factor from the decoder's acceleration unit to m/s^2 (9.80665 for RSAIRY, which reports g)
       ros_send_point_cloud_topic: /rslidar_points      #Topic used to send point cloud through ROS
       ros_queue_length: 100                            #Topic QoS history depth
+      ros_diagnostics_name: ""                         #ROS2: node that publishes the LiDAR's health on /diagnostics as "<name>: LiDAR" (empty: off).
+                                                       #A valid ROS node name, unique per lidar entry
+      ros_diagnostics_temperature_warn: 0.0            #ROS2: WARN at or above this LiDAR temperature, deg C (0: off)
+      ros_diagnostics_temperature_error: 0.0           #ROS2: ERROR at or above this LiDAR temperature, deg C (0: off)
