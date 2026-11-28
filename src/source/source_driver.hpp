@@ -185,10 +185,15 @@ inline void SourceDriver::init(const YAML::Node& config)
     yamlRead<float>(config["ros"], "ros_diagnostics_temperature_warn", temperature_warn, 0);
     yamlRead<float>(config["ros"], "ros_diagnostics_temperature_error", temperature_error, 0);
   }
+  // An IMU is expected when its port is set, except from ROS packets, which carry none.
+  bool imu_expected = false;
+#ifdef ENABLE_IMU_DATA_PARSE
+  imu_expected = driver_param.input_param.imu_port != 0 && driver_param.input_type != InputType::RAW_PACKET;
+#endif
   if (!diagnostics_name.empty())
   {
-    diagnostics_.reset(
-        new SourceDiagnostics(diagnostics_name, lidar_type, temperature_warn, temperature_error, driver_ptr_));
+    diagnostics_.reset(new SourceDiagnostics(diagnostics_name, lidar_type, imu_expected, temperature_warn,
+                                             temperature_error, driver_ptr_));
   }
 #endif
 }

@@ -60,18 +60,23 @@ namespace lidar
 // One status, named "<node_name>: LiDAR". Its values:
 // - the temperature the LiDAR reports in its MSOP packets (LidarDriver::getTemperature), while
 //   packets arrive;
-// - the point cloud rate, and the IMU rate once IMU data has arrived;
-// - the driver's packet timeouts and other packet errors since start, and the last error;
+// - the point cloud rate, and the IMU rate when an IMU is expected or has sent data;
+// - the driver's packet timeouts and packet error reports since start, and the last error;
 // - the model, and the serial number and firmware versions from the DIFOP packets.
 //
 // Levels: ERROR when no point cloud came in the last period, or at or above temperature_error.
-// WARN at or above temperature_warn, on packet errors in the period, or when IMU data stops after
-// it had arrived. A threshold of 0 turns that check off.
+// WARN at or above temperature_warn, on a packet error in the last HOLD_SECONDS, or when an
+// expected IMU sends nothing. A threshold of 0 turns that check off.
+//
+// rs_driver reports most packet errors at most once every 2 s (LIMIT_CALL), and its MSOP timeout
+// once per 1 s select() timeout, so a 1 s period can miss either while the fault persists. The
+// status holds both for HOLD_SECONDS instead of counting them per period.
 class SourceDiagnostics
 {
 public:
-  SourceDiagnostics(const std::string& node_name, const std::string& lidar_type, float temperature_warn,
-                    float temperature_error, std::shared_ptr<LidarDriver<LidarPointCloudMsg>> driver);
+  SourceDiagnostics(const std::string& node_name, const std::string& lidar_type, bool imu_expected,
+                    float temperature_warn, float temperature_error,
+                    std::shared_ptr<LidarDriver<LidarPointCloudMsg>> driver);
   ~SourceDiagnostics();
 
   // Called from the driver's threads.
@@ -86,8 +91,16 @@ public:
   void countError(const Error& error);
 
 private:
+  static constexpr double HOLD_SECONDS = 3.0;
+
   void update(diagnostic_updater::DiagnosticStatusWrapper& stat);
   static std::string toHex(const uint8_t* data, size_t size);
+  static int64_t nowNs()
+  {
+    return std::chrono::duration_cast<std::chrono::nanoseconds>(
+               std::chrono::steady_clock::now().time_since_epoch())
+        .count();
+  }
 
   std::string lidar_type_;
   float temperature_warn_;
@@ -96,15 +109,17 @@ private:
 
   std::atomic<uint32_t> point_clouds_{ 0 };
   std::atomic<uint32_t> imu_data_{ 0 };
-  std::atomic<uint32_t> timeouts_in_period_{ 0 };
-  std::atomic<uint32_t> errors_in_period_{ 0 };
   std::atomic<uint64_t> timeouts_total_{ 0 };
   std::atomic<uint64_t> errors_total_{ 0 };
+  // steady_clock, ns; 0 = never
+  std::atomic<int64_t> last_timeout_ns_{ 0 };
+  std::atomic<int64_t> last_error_ns_{ 0 };
   std::mutex last_error_mutex_;
   std::string last_error_;
+  int64_t last_error_report_ns_{ 0 };  // of last_error_, under last_error_mutex_
 
-  bool imu_seen_{ false };
-  std::chrono::steady_clock::time_point last_update_;
+  bool imu_shown_;  // an IMU is expected, or has sent data
+  int64_t last_update_ns_;
 
   rclcpp::Node::SharedPtr node_;
   std::unique_ptr<diagnostic_updater::Updater> updater_;
@@ -113,15 +128,19 @@ private:
 };
 
 inline SourceDiagnostics::SourceDiagnostics(const std::string& node_name, const std::string& lidar_type,
-                                            float temperature_warn, float temperature_error,
+                                            bool imu_expected, float temperature_warn, float temperature_error,
                                             std::shared_ptr<LidarDriver<LidarPointCloudMsg>> driver)
   : lidar_type_(lidar_type)
   , temperature_warn_(temperature_warn)
   , temperature_error_(temperature_error)
   , driver_(driver)
-  , last_update_(std::chrono::steady_clock::now())
+  , imu_shown_(imu_expected)
+  , last_update_ns_(nowNs())
 {
-  node_ = rclcpp::Node::make_shared(node_name);
+  // A node-local __node remap, so that a process-wide one (launch_ros's Node(name=...)) doesn't
+  // rename this node too.
+  node_ = rclcpp::Node::make_shared(
+      node_name, rclcpp::NodeOptions().arguments({ "--ros-args", "-r", "__node:=" + node_name }));
   updater_.reset(new diagnostic_updater::Updater(node_, 1.0));
   updater_->setHardwareID("RoboSense " + lidar_type_);
   updater_->add("LiDAR", this, &SourceDiagnostics::update);
@@ -147,19 +166,21 @@ inline void SourceDiagnostics::countError(const Error& error)
   {
     return;
   }
-  if (error.error_code == ERRCODE_MSOPTIMEOUT)  // no MSOP packet for 1 s
+  const int64_t now = nowNs();
+  if (error.error_code == ERRCODE_MSOPTIMEOUT)  // no packet for 1 s
   {
-    ++timeouts_in_period_;
     ++timeouts_total_;
+    last_timeout_ns_ = now;
   }
   else
   {
-    ++errors_in_period_;
     ++errors_total_;
+    last_error_ns_ = now;
   }
 
   std::lock_guard<std::mutex> lock(last_error_mutex_);
   last_error_ = error.toString();
+  last_error_report_ns_ = now;
 }
 
 inline std::string SourceDiagnostics::toHex(const uint8_t* data, size_t size)
@@ -178,28 +199,32 @@ inline void SourceDiagnostics::update(diagnostic_updater::DiagnosticStatusWrappe
 {
   using diagnostic_msgs::msg::DiagnosticStatus;
 
-  const auto now = std::chrono::steady_clock::now();
-  const double period = std::chrono::duration<double>(now - last_update_).count();
-  last_update_ = now;
+  const int64_t now = nowNs();
+  const double period = (now - last_update_ns_) * 1e-9;
+  last_update_ns_ = now;
+  auto recent = [now](int64_t t) { return t != 0 && (now - t) * 1e-9 < HOLD_SECONDS; };
 
   const uint32_t point_clouds = point_clouds_.exchange(0);
   const uint32_t imu_data = imu_data_.exchange(0);
-  const uint32_t timeouts = timeouts_in_period_.exchange(0);
-  const uint32_t errors = errors_in_period_.exchange(0);
-  imu_seen_ = imu_seen_ || imu_data > 0;
+  imu_shown_ = imu_shown_ || imu_data > 0;
 
-  std::string last_error;
+  std::string last_error = "none";
   {
     std::lock_guard<std::mutex> lock(last_error_mutex_);
-    last_error = last_error_;
+    if (!last_error_.empty())
+    {
+      char age[32];
+      snprintf(age, sizeof(age), ", %.0f s ago", (now - last_error_report_ns_) * 1e-9);
+      last_error = last_error_ + age;
+    }
   }
 
   char value[32];
 
   if (point_clouds == 0)
   {
-    stat.summary(DiagnosticStatus::ERROR,
-                 timeouts > 0 ? "No packets from the LiDAR" : "No point clouds from the LiDAR");
+    stat.summary(DiagnosticStatus::ERROR, recent(last_timeout_ns_.load()) ? "No packets from the LiDAR" :
+                                                                            "No point clouds from the LiDAR");
     stat.add("Temperature (°C)", "no data");
   }
   else
@@ -226,11 +251,11 @@ inline void SourceDiagnostics::update(diagnostic_updater::DiagnosticStatusWrappe
       stat.add("Temperature (°C)", "not reported");
     }
 
-    if (errors > 0)
+    if (recent(last_error_ns_.load()))
     {
       stat.mergeSummary(DiagnosticStatus::WARN, "Packet errors");
     }
-    if (imu_seen_ && imu_data == 0)
+    if (imu_shown_ && imu_data == 0)
     {
       stat.mergeSummary(DiagnosticStatus::WARN, "No IMU data");
     }
@@ -238,14 +263,15 @@ inline void SourceDiagnostics::update(diagnostic_updater::DiagnosticStatusWrappe
 
   snprintf(value, sizeof(value), "%.1f", period > 0 ? point_clouds / period : 0.0);
   stat.add("Point clouds (Hz)", value);
-  if (imu_seen_)
+  if (imu_shown_)
   {
     snprintf(value, sizeof(value), "%.1f", period > 0 ? imu_data / period : 0.0);
     stat.add("IMU (Hz)", value);
   }
   stat.add("Packet timeouts (total)", std::to_string(timeouts_total_.load()));
-  stat.add("Packet errors (total)", std::to_string(errors_total_.load()));
-  stat.add("Last packet error", last_error.empty() ? "none" : last_error);
+  // rs_driver reports each kind of packet error at most once every 2 s, so this counts reports.
+  stat.add("Packet error reports (total)", std::to_string(errors_total_.load()));
+  stat.add("Last packet error", last_error);
   stat.add("Model", lidar_type_);
 
   DeviceInfo info;
